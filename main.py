@@ -1,13 +1,19 @@
-
+import time
 import cv2
 import numpy as np
 from ultralytics import YOLO
+from collections import deque, Counter
 
 MODEL_PATH = "yolo26n.pt"
 VIDEO_PATH = "traffic_test_video.mp4"
 
 CONFIDENCE = 0.50
 IMAGE_SIZE = 640
+HISTORY_SIZE = 9
+
+tracks = {}
+next_track_id = 0
+frame_number = 0
 
 model = YOLO(MODEL_PATH)
 cap = cv2.VideoCapture(VIDEO_PATH)
@@ -32,6 +38,62 @@ COLORS = {
     "NIEZNANY": (255, 255, 255)
 }
 
+
+def stabilize_color(track_id, color):
+    history = tracks[track_id]["history"]
+    history.append(color)
+
+    recognized = [
+        value for value in history
+        if value != "NIEZNANY"
+    ]
+
+    if len(recognized) < 3:
+        return "NIEZNANY"
+
+    best_color, votes = Counter(recognized).most_common(1)[0]
+
+    return best_color if votes >= 3 else "NIEZNANY"
+
+
+def get_track(center):
+    global next_track_id
+
+    best_id = None
+    min_distance = 100
+
+    for track_id, track in tracks.items():
+        if track["used"]:
+            continue
+
+        old_x, old_y = track["center"]
+
+        distance = np.hypot(
+            center[0] - old_x,
+            center[1] - old_y
+        )
+
+        if distance < min_distance:
+            min_distance = distance
+            best_id = track_id
+
+    if best_id is None:
+        best_id = next_track_id
+        next_track_id += 1
+
+        tracks[best_id] = {
+            "center": center,
+            "history": deque(maxlen=HISTORY_SIZE),
+            "used": False,
+            "last_seen": frame_number
+        }
+
+    track = tracks[best_id]
+    track["center"] = center
+    track["used"] = True
+    track["last_seen"] = frame_number
+
+    return best_id
 
 
 def detect_color(roi):
@@ -79,11 +141,19 @@ if not cap.isOpened():
     print("Cannot open video")
     exit()
 
+previous_time = time.perf_counter()
+fps = 0
+
 while True:
     ret, frame = cap.read()
 
     if not ret:
         break
+
+    frame_number += 1
+
+    for track in tracks.values():
+        track["used"] = False
 
     results = model(
         frame,
@@ -99,9 +169,28 @@ while True:
 
             x1, y1, x2, y2 = map(int, box.xyxy[0])
 
+            width = x2 - x1
+            height = y2 - y1
+
+            if width < 12 or height < 25:
+                continue
+
             roi = frame[y1:y2, x1:x2]
             color_name = detect_color(roi)
-            color = COLORS[color_name]
+
+            center = (
+                (x1 + x2) // 2,
+                (y1 + y2) // 2
+            )
+
+            track_id = get_track(center)
+
+            stable_color = stabilize_color(
+                track_id,
+                color_name
+            )
+
+            color = COLORS[stable_color]
 
             cv2.rectangle(
                 frame,
@@ -111,9 +200,11 @@ while True:
                 2
             )
 
+            label = f"ID: {track_id} {stable_color}"
+
             cv2.putText(
                 frame,
-                color_name,
+                label,
                 (x1, max(y1 - 10, 20)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
@@ -121,10 +212,44 @@ while True:
                 2
             )
 
+    # Remove old tracks
+    old_tracks = [
+        track_id
+        for track_id, track in tracks.items()
+        if frame_number - track["last_seen"] > 20
+    ]
+
+    for track_id in old_tracks:
+        del tracks[track_id]
+
+    # Calculate FPS
+    current_time = time.perf_counter()
+    elapsed = current_time - previous_time
+
+    if elapsed > 0:
+        current_fps = 1 / elapsed
+        fps = current_fps if fps == 0 else 0.9 * fps + 0.1 * current_fps
+
+    previous_time = current_time
+
+    cv2.putText(
+        frame,
+        f"FPS: {fps:.1f}",
+        (20, 35),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (255, 255, 255),
+        2
+    )
+
     cv2.imshow("Traffic Light Recognition", frame)
 
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
+
+cap.release()
+cv2.destroyAllWindows()
+
 
 cap.release()
 cv2.destroyAllWindows()
