@@ -8,7 +8,7 @@ MODEL_PATH = "yolo26n.pt"
 VIDEO_PATH = "traffic_test_video.mp4"
 
 CONFIDENCE = 0.50
-IMAGE_SIZE = 640
+IMAGE_SIZE = 960
 HISTORY_SIZE = 9
 
 tracks = {}
@@ -55,6 +55,21 @@ def stabilize_color(track_id, color):
 
     return best_color if votes >= 3 else "NIEZNANY"
 
+def preprocess(image):
+    image = cv2.medianBlur(image, 3)
+
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+
+    clahe = cv2.createCLAHE(
+        clipLimit=2.0,
+        tileGridSize=(8, 8)
+    )
+
+    l = clahe.apply(l)
+    enhanced = cv2.merge((l, a, b))
+
+    return cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
 
 def get_track(center):
     global next_track_id
@@ -135,14 +150,20 @@ def detect_color(roi):
 
     return best
 
-
-
 if not cap.isOpened():
     print("Cannot open video")
     exit()
 
 previous_time = time.perf_counter()
 fps = 0
+
+video_fps = cap.get(cv2.CAP_PROP_FPS)
+
+if video_fps <= 0:
+    video_fps = 30
+
+frame_time = 1 / video_fps
+start_time = time.perf_counter()
 
 while True:
     ret, frame = cap.read()
@@ -155,8 +176,10 @@ while True:
     for track in tracks.values():
         track["used"] = False
 
+    processed = preprocess(frame)
+
     results = model(
-        frame,
+        processed,
         conf=CONFIDENCE,
         imgsz=IMAGE_SIZE,
         verbose=False
@@ -173,6 +196,11 @@ while True:
             height = y2 - y1
 
             if width < 12 or height < 25:
+                continue
+
+            ratio = height / max(width, 1)
+
+            if ratio < 0.8 or ratio > 5.0:
                 continue
 
             roi = frame[y1:y2, x1:x2]
@@ -244,12 +272,30 @@ while True:
 
     cv2.imshow("Traffic Light Recognition", frame)
 
-    if cv2.waitKey(1) & 0xFF == ord("q"):
+    elapsed_video = time.perf_counter() - start_time
+    expected_time = frame_number * frame_time
+
+    wait_time = max(
+        1,
+        int((expected_time - elapsed_video) * 1000)
+    )
+
+    if cv2.waitKey(wait_time) & 0xFF == ord("q"):
         break
 
-cap.release()
-cv2.destroyAllWindows()
+def main():
+    if not cap.isOpened():
+        print("Cannot open video:", VIDEO_PATH)
+        return
 
+    # Tutaj znajduje się Twoja główna pętla while
+
+if __name__ == "__main__":
+    try:
+        main()
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
 
 cap.release()
 cv2.destroyAllWindows()
